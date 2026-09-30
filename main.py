@@ -8,7 +8,11 @@ load_dotenv()
 
 class MeuBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='n!', intents=discord.Intents.all())
+        super().__init__(
+            command_prefix='n!',
+            intents=discord.Intents.all(),
+            activity=discord.CustomActivity(name='Buscando Viajantes'),
+        )
 
     async def setup_hook(self):
         for ficheiro in pathlib.Path('./cogs').rglob('*.py'):
