@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
 import random
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy import select
 from database.connection import AsyncSessionLocal
@@ -51,10 +53,13 @@ class Economia(commands.Cog):
 
 
 
-    @commands.hybrid_command(name="trabalhar", description="Trabalhe para ganhar Pepitas de Ouro (Cooldown: 2 horas).")
-    @commands.cooldown(1, 7200, commands.BucketType.user)
+    @commands.hybrid_command(name="trabalhar", description="Trabalhe para ganhar Pepitas de Ouro (Cooldown: 8 horas).")
+    @commands.cooldown(1, 28800, commands.BucketType.user)
     async def trabalhar(self, ctx: commands.Context):
         ganho = random.randint(200, 500)
+        adicional_noturno = datetime.now(ZoneInfo("America/Sao_Paulo")).hour >= 22
+        if adicional_noturno:
+            ganho += ganho // 2
 
         async with AsyncSessionLocal() as session:
             usuario_db = await self.obter_usuario(session, ctx.author.id)
@@ -62,7 +67,11 @@ class Economia(commands.Cog):
             usuario_db.pepitas += ganho
             await session.commit()
             
-            await ctx.send(f"Você trabalhou duro nas minas e encontrou <:pepita:1554731685994827846> **{ganho} Pepitas de Ouro**! Volte daqui a 2 horas.")
+            detalhe_adicional = " (inclui adicional noturno de 50%)" if adicional_noturno else ""
+            await ctx.send(
+                f"Você trabalhou duro nas minas e encontrou <:pepita:1554731685994827846> "
+                f"**{ganho} Pepitas de Ouro**{detalhe_adicional}! Volte daqui a 8 horas."
+            )
 
 
 
