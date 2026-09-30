@@ -38,7 +38,7 @@ class Informacoes(commands.Cog):
 
         embed.add_field(
             name=f"`👥` Membros ({total_membros})",
-            value=f"`👤` Humanos: {humanos}\n`🤖` Bots: {bots}\n`👮` Admins: {admins}",
+            value=f"`👤` Humanos: {humanos}\n`💻` Bots: {bots}\n`👮` Admins: {admins}",
             inline=True
         )
 

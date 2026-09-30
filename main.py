@@ -10,7 +10,6 @@ class MeuBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='n!', intents=discord.Intents.all())
 
-    
     async def setup_hook(self):
         for ficheiro in pathlib.Path('./cogs').rglob('*.py'):
             modulo = str(ficheiro).replace('.py', '').replace('\\', '.').replace('/', '.')
@@ -27,6 +26,7 @@ class MeuBot(commands.Bot):
 
     async def on_ready(self):
         print(f'Bot online como {self.user}')
+
 
 bot = MeuBot()
 bot.run(os.getenv('DISCORD_TOKEN'))
