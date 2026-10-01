@@ -12,6 +12,7 @@ class MeuBot(commands.Bot):
             command_prefix='n!',
             intents=discord.Intents.all(),
             activity=discord.CustomActivity(name='Buscando Viajantes'),
+            status=discord.Status.idle
         )
 
     async def setup_hook(self):
