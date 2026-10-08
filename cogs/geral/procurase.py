@@ -18,6 +18,8 @@ class Procurase(commands.Cog):
     DATABASE_PATH = PROJECT_ROOT / "dados.db"
     DATABASE_TABLE = "procurase_posters"
     BUTTON_ID = "procurase:hang_poster"
+    DESCRIPTION_MAX_LENGTH = 300
+    DESCRIPTION_MAX_LINES = 5
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -57,6 +59,7 @@ class Procurase(commands.Cog):
         self,
         destination: discord.abc.Messageable,
         member: discord.Member,
+        description: str = "",
     ) -> bool:
         async with self._posting_lock:
             today = datetime.now(self.TIMEZONE).date().isoformat()
@@ -76,8 +79,8 @@ class Procurase(commands.Cog):
             image_bytes = await asyncio.to_thread(
                 self._render_poster,
                 avatar_bytes,
-                member.display_name,
-                reward,
+                member.name,
+                description,
             )
 
             image_file = discord.File(
@@ -85,7 +88,7 @@ class Procurase(commands.Cog):
                 filename="procurado.png",
             )
             embed = discord.Embed(
-                title=f"Procurase: {member.display_name}",
+                title=f"Procurase: {member.name}",
                 color=discord.Color.dark_gold(),
             )
             embed.set_image(url="attachment://procurado.png")
@@ -121,7 +124,7 @@ class Procurase(commands.Cog):
 
     @classmethod
     def _render_poster(
-        cls, avatar_bytes: bytes, display_name: str, reward: int
+        cls, avatar_bytes: bytes, username: str, description: str
     ) -> bytes:
         with Image.open(cls.TEMPLATE_PATH) as template:
             poster = template.convert("RGB")
@@ -135,59 +138,190 @@ class Procurase(commands.Cog):
 
         poster.paste(square_avatar, (287, 447))
         draw = ImageDraw.Draw(poster)
-        name_font_size = 30
-        name_font = ImageFont.load_default(size=name_font_size)
+        username_font_size = 28
+        username_font = ImageFont.load_default(size=username_font_size)
         while (
-            draw.textbbox((0, 0), display_name, font=name_font)[2] > 365
-            and name_font_size > 16
+            draw.textlength(username, font=username_font) > 360
+            and username_font_size > 16
         ):
-            name_font_size -= 2
-            name_font = ImageFont.load_default(size=name_font_size)
-
-        poster_name = display_name
-        if draw.textbbox((0, 0), poster_name, font=name_font)[2] > 365:
+            username_font_size -= 2
+            username_font = ImageFont.load_default(size=username_font_size)
+        poster_username = username
+        if draw.textlength(poster_username, font=username_font) > 360:
             while (
-                poster_name
-                and draw.textbbox((0, 0), poster_name + "…", font=name_font)[2] > 365
+                poster_username
+                and draw.textlength(poster_username + "…", font=username_font) > 360
             ):
-                poster_name = poster_name[:-1]
-            poster_name = poster_name.rstrip() + "…"
+                poster_username = poster_username[:-1]
+            poster_username = poster_username.rstrip() + "…"
 
-        label_font = ImageFont.load_default(size=30)
-        reward_font = ImageFont.load_default(size=42)
+        description_font = ImageFont.load_default(size=22)
+        description_lines = cls._wrap_description(
+            draw,
+            description,
+            description_font,
+            max_width=360,
+        )
         text_color = (54, 43, 30)
 
         draw.text(
-            (400, 739),
-            poster_name,
-            font=name_font,
+            (222, 710),
+            poster_username,
+            font=username_font,
             fill=text_color,
             stroke_width=1,
             stroke_fill=text_color,
-            anchor="mm",
         )
-        draw.text(
-            (400, 789),
-            "RECOMPENSA",
-            font=label_font,
+        draw.multiline_text(
+            (222, 751),
+            "\n".join(description_lines),
+            font=description_font,
             fill=text_color,
             stroke_width=1,
             stroke_fill=text_color,
-            anchor="mm",
-        )
-        draw.text(
-            (400, 842),
-            f"${reward:,}",
-            font=reward_font,
-            fill=text_color,
-            stroke_width=1,
-            stroke_fill=text_color,
-            anchor="mm",
+            spacing=4,
+            align="left",
         )
 
         output = io.BytesIO()
         poster.save(output, format="PNG", optimize=True)
         return output.getvalue()
+
+    @classmethod
+    def _wrap_description(
+        cls,
+        draw: ImageDraw.ImageDraw,
+        description: str,
+        font: ImageFont.FreeTypeFont,
+        *,
+        max_width: int,
+    ) -> list[str]:
+        if len(description) > cls.DESCRIPTION_MAX_LENGTH:
+            raise ValueError(
+                f"A descrição deve ter no máximo {cls.DESCRIPTION_MAX_LENGTH} caracteres."
+            )
+
+        lines: list[str] = []
+        for paragraph in description.splitlines() or [""]:
+            if not paragraph:
+                lines.append("")
+                continue
+
+            current_line = ""
+            for word in paragraph.split():
+                candidate = f"{current_line} {word}".strip()
+                if draw.textlength(candidate, font=font) <= max_width:
+                    current_line = candidate
+                    continue
+
+                if current_line:
+                    lines.append(current_line)
+                    current_line = ""
+
+                for character in word:
+                    candidate = current_line + character
+                    if (
+                        current_line
+                        and draw.textlength(candidate, font=font) > max_width
+                    ):
+                        lines.append(current_line)
+                        current_line = character
+                    else:
+                        current_line = candidate
+
+            lines.append(current_line)
+
+        if len(lines) > cls.DESCRIPTION_MAX_LINES:
+            raise ValueError(
+                "A descrição é longa demais para o cartaz. "
+                f"Reduza o texto para caber em até {cls.DESCRIPTION_MAX_LINES} linhas."
+            )
+
+        return lines
+
+
+class ProcuraseDescriptionModal(
+    discord.ui.Modal, title="Descrição do cartaz"
+):
+    description_input = discord.ui.TextInput(
+        label="Descrição",
+        placeholder="Escreva uma descrição curta; quebras de linha são aceitas.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=Procurase.DESCRIPTION_MAX_LENGTH,
+    )
+
+    def __init__(self, cog: Procurase):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "Este formulário só pode ser usado dentro do servidor.",
+                ephemeral=True,
+            )
+            return
+
+        description = self.description_input.value.strip()
+        if not description:
+            await interaction.response.send_message(
+                "Escreva uma descrição para o cartaz.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                self.cog._wrap_description,
+                ImageDraw.Draw(Image.new("RGB", (1, 1))),
+                description,
+                ImageFont.load_default(size=22),
+                max_width=360,
+            )
+        except ValueError as error:
+            await interaction.response.send_message(
+                str(error),
+                ephemeral=True,
+            )
+            return
+
+        if not isinstance(interaction.channel, discord.abc.Messageable):
+            await interaction.response.send_message(
+                "Não consegui localizar este canal.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            posted = await self.cog.publish_poster(
+                interaction.channel,
+                interaction.user,
+                description,
+            )
+        except (aiosqlite.Error, discord.HTTPException, OSError, ValueError) as error:
+            print(
+                f"Erro ao publicar cartaz de {interaction.user.id} "
+                f"pelo formulário: {error}"
+            )
+            await interaction.followup.send(
+                "Não consegui pendurar seu cartaz. Tente novamente mais tarde.",
+                ephemeral=True,
+            )
+            return
+
+        if not posted:
+            await interaction.followup.send(
+                "Você já pendurou seu cartaz hoje",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "Seu cartaz foi pendurado!",
+            ephemeral=True,
+        )
 
 
 class ProcuraseView(discord.ui.View):
@@ -221,41 +355,7 @@ class ProcuraseView(discord.ui.View):
             )
             return
 
-        if not isinstance(interaction.channel, discord.abc.Messageable):
-            await interaction.response.send_message(
-                "Não consegui localizar este canal.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            posted = await self.cog.publish_poster(
-                interaction.channel,
-                interaction.user,
-            )
-        except (aiosqlite.Error, discord.HTTPException, OSError) as error:
-            print(
-                f"Erro ao publicar cartaz de {interaction.user.id} "
-                f"pelo botão: {error}"
-            )
-            await interaction.followup.send(
-                "Não consegui pendurar seu cartaz. Tente novamente mais tarde.",
-                ephemeral=True,
-            )
-            return
-
-        if not posted:
-            await interaction.followup.send(
-                "Você já pendurou seu cartaz hoje",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.followup.send(
-            "Seu cartaz foi pendurado!",
-            ephemeral=True,
-        )
+        await interaction.response.send_modal(ProcuraseDescriptionModal(self.cog))
 
 
 async def setup(bot: commands.Bot):
