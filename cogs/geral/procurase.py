@@ -71,7 +71,7 @@ class Procurase(commands.Cog):
         with Image.open(io.BytesIO(avatar_bytes)) as avatar:
             square_avatar = ImageOps.fit(
                 avatar.convert("RGB"),
-                (212, 213),
+                (212, 215),
                 method=Image.Resampling.LANCZOS,
             )
 
