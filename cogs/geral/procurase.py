@@ -1,42 +1,23 @@
 import asyncio
 import io
-import random
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-import aiosqlite
 import discord
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 class Procurase(commands.Cog):
-    TIMEZONE = ZoneInfo("America/Sao_Paulo")
     PROJECT_ROOT = Path(__file__).resolve().parents[2]
     TEMPLATE_PATH = PROJECT_ROOT / "assets" / "procurase_template.png"
-    DATABASE_PATH = PROJECT_ROOT / "dados.db"
-    DATABASE_TABLE = "procurase_posters"
     BUTTON_ID = "procurase:hang_poster"
     DESCRIPTION_MAX_LENGTH = 300
     DESCRIPTION_MAX_LINES = 5
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._posting_lock = asyncio.Lock()
 
     async def cog_load(self):
-        async with aiosqlite.connect(self.DATABASE_PATH) as database:
-            await database.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.DATABASE_TABLE} (
-                    user_id INTEGER PRIMARY KEY,
-                    last_post_date TEXT NOT NULL
-                )
-                """
-            )
-            await database.commit()
-
         self.bot.add_view(ProcuraseView(self))
 
     @commands.command(name="procurase", help="Pendura seu cartaz de procurado.")
@@ -46,81 +27,39 @@ class Procurase(commands.Cog):
             return
 
         try:
-            posted = await self.publish_poster(ctx.channel, ctx.author)
-        except (aiosqlite.Error, discord.HTTPException, OSError) as error:
+            await self.publish_poster(ctx.channel, ctx.author)
+        except (discord.HTTPException, OSError, ValueError) as error:
             print(f"Erro ao publicar cartaz de {ctx.author.id}: {error}")
             await ctx.send("Não consegui pendurar seu cartaz. Tente novamente mais tarde.")
-            return
-
-        if not posted:
-            await ctx.send("Você já pendurou seu cartaz hoje")
 
     async def publish_poster(
         self,
         destination: discord.abc.Messageable,
         member: discord.Member,
         description: str = "",
-    ) -> bool:
-        async with self._posting_lock:
-            today = datetime.now(self.TIMEZONE).date().isoformat()
-            async with aiosqlite.connect(self.DATABASE_PATH) as database:
-                cursor = await database.execute(
-                    f"SELECT last_post_date FROM {self.DATABASE_TABLE} "
-                    "WHERE user_id = ?",
-                    (member.id,),
-                )
-                row = await cursor.fetchone()
+    ) -> None:
+        avatar_bytes = await member.display_avatar.with_size(256).read()
+        image_bytes = await asyncio.to_thread(
+            self._render_poster,
+            avatar_bytes,
+            member.name,
+            description,
+        )
 
-            if row is not None and row[0] == today:
-                return False
-
-            avatar_bytes = await member.display_avatar.with_size(256).read()
-            reward = random.randint(1, 1_000_000)
-            image_bytes = await asyncio.to_thread(
-                self._render_poster,
-                avatar_bytes,
-                member.name,
-                description,
-            )
-
-            image_file = discord.File(
-                io.BytesIO(image_bytes),
-                filename="procurado.png",
-            )
-            embed = discord.Embed(
-                title=f"Procurase: {member.name}",
-                color=discord.Color.dark_gold(),
-            )
-            embed.set_image(url="attachment://procurado.png")
-            message = await destination.send(
-                embed=embed,
-                file=image_file,
-                view=ProcuraseView(self),
-            )
-
-            try:
-                async with aiosqlite.connect(self.DATABASE_PATH) as database:
-                    await database.execute(
-                        f"""
-                        INSERT INTO {self.DATABASE_TABLE} (user_id, last_post_date)
-                        VALUES (?, ?)
-                        ON CONFLICT(user_id) DO UPDATE
-                        SET last_post_date = excluded.last_post_date
-                        """,
-                        (member.id, today),
-                    )
-                    await database.commit()
-            except aiosqlite.Error:
-                try:
-                    await message.delete()
-                except discord.HTTPException as cleanup_error:
-                    print(
-                        f"Erro ao remover cartaz sem cooldown salvo "
-                        f"{message.id}: {cleanup_error}"
-                    )
-                raise
-
-            return True
+        image_file = discord.File(
+            io.BytesIO(image_bytes),
+            filename="procurado.png",
+        )
+        embed = discord.Embed(
+            title=f"Procurase: {member.name}",
+            color=discord.Color.dark_gold(),
+        )
+        embed.set_image(url="attachment://procurado.png")
+        await destination.send(
+            embed=embed,
+            file=image_file,
+            view=ProcuraseView(self),
+        )
 
     @classmethod
     def _render_poster(
@@ -165,12 +104,13 @@ class Procurase(commands.Cog):
         text_color = (54, 43, 30)
 
         draw.text(
-            (222, 710),
+            (400, 710),
             poster_username,
             font=username_font,
             fill=text_color,
             stroke_width=1,
             stroke_fill=text_color,
+            anchor="mm",
         )
         draw.multiline_text(
             (222, 751),
@@ -295,25 +235,18 @@ class ProcuraseDescriptionModal(
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            posted = await self.cog.publish_poster(
+            await self.cog.publish_poster(
                 interaction.channel,
                 interaction.user,
                 description,
             )
-        except (aiosqlite.Error, discord.HTTPException, OSError, ValueError) as error:
+        except (discord.HTTPException, OSError, ValueError) as error:
             print(
                 f"Erro ao publicar cartaz de {interaction.user.id} "
                 f"pelo formulário: {error}"
             )
             await interaction.followup.send(
                 "Não consegui pendurar seu cartaz. Tente novamente mais tarde.",
-                ephemeral=True,
-            )
-            return
-
-        if not posted:
-            await interaction.followup.send(
-                "Você já pendurou seu cartaz hoje",
                 ephemeral=True,
             )
             return
