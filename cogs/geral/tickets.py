@@ -277,13 +277,13 @@ class Tickets(commands.Cog):
 
         allowed_mentions = discord.AllowedMentions(
             users=[requester],
-            roles=[admin_role],
+            roles=True,
             everyone=False,
             replied_user=False,
         )
         try:
             await ticket_channel.send(
-                content=f"{requester.mention} {admin_role.mention}",
+                content=f"{requester.mention} <@&{self.ADMIN_ROLE_ID}>",
                 embed=embed,
                 view=TicketActionsView(self),
                 allowed_mentions=allowed_mentions,
