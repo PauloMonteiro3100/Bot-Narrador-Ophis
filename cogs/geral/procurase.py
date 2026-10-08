@@ -76,6 +76,7 @@ class Procurase(commands.Cog):
             image_bytes = await asyncio.to_thread(
                 self._render_poster,
                 avatar_bytes,
+                member.display_name,
                 reward,
             )
 
@@ -83,7 +84,10 @@ class Procurase(commands.Cog):
                 io.BytesIO(image_bytes),
                 filename="procurado.png",
             )
-            embed = discord.Embed(color=discord.Color.dark_gold())
+            embed = discord.Embed(
+                title=f"Procurase: {member.display_name}",
+                color=discord.Color.dark_gold(),
+            )
             embed.set_image(url="attachment://procurado.png")
             message = await destination.send(
                 embed=embed,
@@ -116,7 +120,9 @@ class Procurase(commands.Cog):
             return True
 
     @classmethod
-    def _render_poster(cls, avatar_bytes: bytes, reward: int) -> bytes:
+    def _render_poster(
+        cls, avatar_bytes: bytes, display_name: str, reward: int
+    ) -> bytes:
         with Image.open(cls.TEMPLATE_PATH) as template:
             poster = template.convert("RGB")
 
@@ -129,13 +135,40 @@ class Procurase(commands.Cog):
 
         poster.paste(square_avatar, (287, 447))
         draw = ImageDraw.Draw(poster)
-        label_font = ImageFont.load_default(size=36)
-        reward_font = ImageFont.load_default(size=52)
+        name_font_size = 30
+        name_font = ImageFont.load_default(size=name_font_size)
+        while (
+            draw.textbbox((0, 0), display_name, font=name_font)[2] > 365
+            and name_font_size > 16
+        ):
+            name_font_size -= 2
+            name_font = ImageFont.load_default(size=name_font_size)
+
+        poster_name = display_name
+        if draw.textbbox((0, 0), poster_name, font=name_font)[2] > 365:
+            while (
+                poster_name
+                and draw.textbbox((0, 0), poster_name + "…", font=name_font)[2] > 365
+            ):
+                poster_name = poster_name[:-1]
+            poster_name = poster_name.rstrip() + "…"
+
+        label_font = ImageFont.load_default(size=30)
+        reward_font = ImageFont.load_default(size=42)
         text_color = (54, 43, 30)
 
         draw.text(
-            (400, 752),
-            "RECOMPENSA:",
+            (400, 739),
+            poster_name,
+            font=name_font,
+            fill=text_color,
+            stroke_width=1,
+            stroke_fill=text_color,
+            anchor="mm",
+        )
+        draw.text(
+            (400, 789),
+            "RECOMPENSA",
             font=label_font,
             fill=text_color,
             stroke_width=1,
@@ -143,7 +176,7 @@ class Procurase(commands.Cog):
             anchor="mm",
         )
         draw.text(
-            (400, 817),
+            (400, 842),
             f"${reward:,}",
             font=reward_font,
             fill=text_color,
