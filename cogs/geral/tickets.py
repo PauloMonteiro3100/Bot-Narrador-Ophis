@@ -258,8 +258,7 @@ class Tickets(commands.Cog):
         embed = discord.Embed(
             title=f"{emoji} {title}",
             description=(
-                f"{requester.mention}, aguarde um instante até que algum "
-                f"membro de {admin_role.mention} te atenda."
+                "Aguarde um instante até que alguém da equipe te atenda."
                 + (f"\n\n**Relato:**\n{report}" if report is not None else "")
             ),
             color=discord.Color(0x5865F2),
@@ -291,7 +290,10 @@ class Tickets(commands.Cog):
         )
         try:
             await ticket_channel.send(
-                content=f"{requester.mention} <@&{self.ADMIN_ROLE_ID}>",
+                content=(
+                    f"🎫 Ticket aberto por {requester.mention}. "
+                    f"<@&{self.ADMIN_ROLE_ID}>, por favor, atendam."
+                ),
                 embed=embed,
                 view=TicketActionsView(self),
                 allowed_mentions=allowed_mentions,
@@ -567,9 +569,10 @@ class TicketActionsView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
         try:
+            close_at = int(discord.utils.utcnow().timestamp()) + 5
             await channel.send(
                 "🙏 Obrigado por utilizar nossos serviços. "
-                "Este canal será encerrado em 5 segundos."
+                f"Este canal será encerrado <t:{close_at}:R>."
             )
             await asyncio.sleep(5)
             await channel.delete(reason=f"Ticket finalizado por {interaction.user}")
