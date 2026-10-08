@@ -2,3 +2,5 @@ venv/
 .env
 __pycache__/
 .vscode/
+database/tickets_panel.json
+database/tickets_panel.tmp
