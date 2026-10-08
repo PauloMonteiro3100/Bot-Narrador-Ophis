@@ -224,6 +224,14 @@ class Tickets(commands.Cog):
             attach_files=True,
             embed_links=True,
         )
+        bot_permissions = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            embed_links=True,
+            mention_everyone=True,
+        )
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             requester: permissions,
@@ -235,7 +243,7 @@ class Tickets(commands.Cog):
                 embed_links=True,
                 manage_messages=True,
             ),
-            bot_member: permissions,
+            bot_member: bot_permissions,
         }
 
         title, emoji = self.SERVICES[service]
@@ -277,7 +285,7 @@ class Tickets(commands.Cog):
 
         allowed_mentions = discord.AllowedMentions(
             users=[requester],
-            roles=True,
+            roles=[admin_role],
             everyone=False,
             replied_user=False,
         )
