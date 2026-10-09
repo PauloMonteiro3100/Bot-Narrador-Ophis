@@ -1,37 +1,10 @@
-"""Criador de mensagens: embeds clássicos e Components V2.
-
-Requer Python 3.10 ou superior.
-Instalação: python -m pip install -U 'discord.py>=2.6,<3'
-Substitua o cog antigo, mantenha seu load_extension e sincronize a árvore de
-comandos pelo procedimento que o bot já usa. Não carregue os dois cogs juntos.
-
-/criarembed: formulário para JSON de até 4.000 caracteres.
-/criarembedarquivo arquivo: anexe JSON UTF-8 de até 1 MB (ideal para as regras).
-A prévia e a confirmação são privadas. Só publica após aprovação do autor.
-
-V2 suportado: Container (17), TextDisplay (10), MediaGallery (12), Separator
-(14). Outros componentes são recusados explicitamente: botões interativos
-personalizados precisam de callbacks próprios, não basta importar seu JSON.
-Embeds clássicos continuam aceitos. Não misture embeds/content com V2.
-IDs de componentes e actions vazio de exportadores são dispensáveis.
-
-Exemplo V2 (troque a URL por uma imagem acessível e mantenha parâmetros):
-{"components":[{"type":17,"components":[
- {"type":12,"items":[{"media":{"url":"https://seu-site/banner.gif"}}]},
- {"type":10,"content":"# Regras\\nBem-vindo(a)!"},
- {"type":14},
- {"type":10,"content":"Respeite todos os membros."}
-]}]}
-
-O limite do texto visível V2 é validado separadamente do tamanho do JSON.
-Links temporários do Discord podem expirar: recopie links válidos completos.
-Este cog não envia arquivos de mídia: attachment:// exige implementação de
-anexos e não é aceito aqui. AllowedMentions.none evita pings acidentais.
-"""
 import asyncio
+import base64
+import binascii
+import io
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import discord
@@ -43,6 +16,7 @@ if not hasattr(discord.ui, 'LayoutView'):
 
 log = logging.getLogger(__name__)
 MAX_FILE = 1_000_000
+MAX_MEDIA_BYTES = 8 * 1024 * 1024
 
 
 class JSONInvalido(ValueError):
@@ -63,6 +37,12 @@ def imagem_url(valor):
 
 
 @dataclass
+class Anexos:
+    arquivos: list = field(default_factory=list)
+    tamanho: int = 0
+
+
+@dataclass
 class Mensagem:
     content: str | None = None
     embeds: list | None = None
@@ -71,49 +51,274 @@ class Mensagem:
     def envio(self):
         args = {'allowed_mentions': discord.AllowedMentions.none()}
         if self.components is not None:
+            anexos = Anexos()
             view = discord.ui.LayoutView(timeout=None)
             for item in self.components:
-                view.add_item(componente(item))
+                view.add_item(componente(item, anexos))
             exigir(view.total_children_count <= 40, 'Máximo de 40 componentes por mensagem.')
             exigir(view.content_length() <= 4000, 'O texto visível V2 excede 4.000 caracteres. Divida em mensagens.')
             args['view'] = view  # discord.py define IS_COMPONENTS_V2 automaticamente.
+            if anexos.arquivos:
+                args['files'] = anexos.arquivos
         else:
             args.update(content=self.content, embeds=self.embeds or [])
         return args
 
 
-def componente(item, dentro=False):
+def validar_bool(item, chave, padrao=False):
+    valor = item.get(chave, padrao)
+    exigir(type(valor) is bool, f'{chave} precisa ser true ou false.')
+    return valor
+
+
+def id_componente(item):
+    valor = item.get('id')
+    exigir(
+        valor is None or type(valor) is int and 0 <= valor <= 0xFFFFFFFF,
+        'id de componente precisa ser um inteiro de 0 a 4294967295.',
+    )
+    return valor
+
+
+def emoji_componente(valor):
+    if valor is None or isinstance(valor, str):
+        return valor
+    exigir(isinstance(valor, dict), 'emoji precisa ser texto ou objeto.')
+    emoji_id = valor.get('id')
+    nome = valor.get('name')
+    exigir(emoji_id is None or str(emoji_id).isdigit(), 'ID de emoji inválido.')
+    exigir(nome is None or isinstance(nome, str), 'Nome de emoji inválido.')
+    return discord.PartialEmoji(
+        name=nome,
+        id=int(emoji_id) if emoji_id is not None else None,
+        animated=validar_bool(valor, 'animated'),
+    )
+
+
+def criar_midia(valor, anexos, *, arquivo=False):
+    if isinstance(valor, dict):
+        valor = valor.get('url')
+    exigir(isinstance(valor, str) and valor, 'Mídia precisa ser uma URL ou data URI.')
+    if valor.startswith('data:'):
+        try:
+            cabecalho, conteudo_b64 = valor.split(',', 1)
+        except ValueError as exc:
+            raise JSONInvalido('Imagem data URI inválida.') from exc
+        tipo_mime = cabecalho[5:].split(';', 1)[0].lower()
+        exigir(cabecalho.endswith(';base64') and '/' in tipo_mime,
+               'Mídia inline precisa indicar um MIME type e usar base64.')
+        if not arquivo:
+            exigir(
+                tipo_mime in ('image/png', 'image/jpeg', 'image/gif', 'image/webp'),
+                'Imagem inline precisa ser PNG, JPEG, GIF ou WebP em base64.',
+            )
+        try:
+            conteudo = base64.b64decode(conteudo_b64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise JSONInvalido('Imagem data URI inválida.') from exc
+        exigir(bool(conteudo), 'Imagem inline vazia.')
+        exigir(anexos.tamanho + len(conteudo) <= MAX_MEDIA_BYTES, 'As mídias inline excedem 8 MB por mensagem.')
+        extensao = {
+            'image/jpeg': 'jpg',
+            'image/png': 'png',
+            'image/gif': 'gif',
+            'image/webp': 'webp',
+        }.get(tipo_mime, 'bin')
+        upload = discord.File(io.BytesIO(conteudo), filename=f'component-media-{len(anexos.arquivos) + 1}.{extensao}')
+        anexos.arquivos.append(upload)
+        anexos.tamanho += len(conteudo)
+        return upload
+    exigir(not arquivo, 'File V2 exige uma mídia inline em base64; URLs externas não são anexos.')
+    return imagem_url(valor)
+
+
+def callback_sem_acao(item):
+    async def responder(interaction):
+        await interaction.response.send_message(
+            'Este componente foi importado sem uma ação configurada.',
+            ephemeral=True,
+        )
+
+    item.callback = responder
+    return item
+
+
+def componente(item, anexos, dentro=False):
     exigir(isinstance(item, dict), 'Cada componente precisa ser um objeto JSON.')
     tipo = item.get('type')
+    exigir(type(tipo) is int, 'type do componente precisa ser um número inteiro.')
+    componente_id = id_componente(item)
     if tipo == 10:
         texto = item.get('content')
         exigir(isinstance(texto, str) and 0 < len(texto) <= 4000, 'TextDisplay exige texto de 1 a 4.000 caracteres.')
-        return discord.ui.TextDisplay(texto)
+        return discord.ui.TextDisplay(texto, id=componente_id)
+    if tipo == 11:
+        descricao = item.get('description')
+        exigir(descricao is None or isinstance(descricao, str) and len(descricao) <= 1024, 'Descrição da miniatura inválida.')
+        return discord.ui.Thumbnail(
+            criar_midia(item.get('media'), anexos),
+            description=descricao,
+            spoiler=validar_bool(item, 'spoiler'),
+            id=componente_id,
+        )
     if tipo == 12:
         itens = item.get('items')
         exigir(isinstance(itens, list) and 1 <= len(itens) <= 10, 'MediaGallery exige de 1 a 10 imagens.')
         galeria = []
         for entrada in itens:
-            exigir(isinstance(entrada, dict) and isinstance(entrada.get('media'), dict), 'Item de galeria inválido.')
+            exigir(isinstance(entrada, dict), 'Item de galeria inválido.')
             descricao = entrada.get('description')
             exigir(descricao is None or isinstance(descricao, str) and len(descricao) <= 1024, 'Descrição da imagem inválida.')
             galeria.append(discord.MediaGalleryItem(
-                imagem_url(entrada['media'].get('url')),
-                description=descricao, spoiler=bool(entrada.get('spoiler', False))))
-        return discord.ui.MediaGallery(*galeria)
+                criar_midia(entrada.get('media'), anexos),
+                description=descricao,
+                spoiler=validar_bool(entrada, 'spoiler'),
+            ))
+        return discord.ui.MediaGallery(*galeria, id=componente_id)
+    if tipo == 13:
+        arquivo_json = item.get('file')
+        exigir(isinstance(arquivo_json, dict), 'File V2 precisa de file.url.')
+        return discord.ui.File(
+            criar_midia(arquivo_json, anexos, arquivo=True),
+            spoiler=validar_bool(item, 'spoiler'),
+            id=componente_id,
+        )
     if tipo == 14:
         espaco = item.get('spacing', 1)
-        exigir(espaco in (1, 2), 'Separator.spacing deve ser 1 ou 2.')
-        return discord.ui.Separator(visible=bool(item.get('divider', True)), spacing=discord.SeparatorSpacing(espaco))
+        exigir(type(espaco) is int and espaco in (1, 2), 'Separator.spacing deve ser 1 ou 2.')
+        return discord.ui.Separator(
+            visible=validar_bool(item, 'divider', True),
+            spacing=discord.SeparatorSpacing(espaco),
+            id=componente_id,
+        )
     if tipo == 17:
         exigir(not dentro, 'Não coloque um Container dentro de outro Container.')
         filhos = item.get('components')
         exigir(isinstance(filhos, list) and 1 <= len(filhos) <= 39, 'Container precisa ter componentes (máximo 39 aqui).')
         cor = item.get('accent_color')
         exigir(cor is None or type(cor) is int and 0 <= cor <= 0xFFFFFF, 'accent_color precisa ser um inteiro RGB válido.')
-        return discord.ui.Container(*(componente(f, True) for f in filhos),
-                                    accent_colour=cor, spoiler=bool(item.get('spoiler', False)))
-    raise JSONInvalido(f'Componente type={tipo} não suportado. Este cog aceita 10, 12, 14 e 17.')
+        return discord.ui.Container(
+            *(componente(f, anexos, True) for f in filhos),
+            accent_colour=cor,
+            spoiler=validar_bool(item, 'spoiler'),
+            id=componente_id,
+        )
+    if tipo == 9:
+        filhos = item.get('components')
+        exigir(isinstance(filhos, list) and 1 <= len(filhos) <= 3, 'Section precisa ter de 1 a 3 componentes de texto.')
+        textos = [componente(filho, anexos, True) for filho in filhos]
+        exigir(all(isinstance(filho, discord.ui.TextDisplay) for filho in textos), 'Section aceita apenas TextDisplay como conteúdo.')
+        acessorio = componente(item.get('accessory'), anexos, True)
+        exigir(isinstance(acessorio, (discord.ui.Thumbnail, discord.ui.Button)), 'Section precisa de Thumbnail ou Button como accessory.')
+        return discord.ui.Section(*textos, accessory=acessorio, id=componente_id)
+    if tipo == 1:
+        filhos = item.get('components')
+        exigir(isinstance(filhos, list) and 1 <= len(filhos) <= 5, 'ActionRow precisa ter de 1 a 5 componentes.')
+        itens = [componente(filho, anexos, True) for filho in filhos]
+        exigir(
+            all(isinstance(filho, discord.ui.Button) for filho in itens)
+            or len(itens) == 1 and isinstance(
+                itens[0],
+                (
+                    discord.ui.Select,
+                    discord.ui.UserSelect,
+                    discord.ui.RoleSelect,
+                    discord.ui.MentionableSelect,
+                    discord.ui.ChannelSelect,
+                ),
+            ),
+            'ActionRow aceita até 5 botões ou um único select.',
+        )
+        return discord.ui.ActionRow(*itens, id=componente_id)
+    if tipo == 2:
+        estilo = item.get('style', 2)
+        if isinstance(estilo, str):
+            try:
+                estilo = discord.ButtonStyle[estilo.lower()]
+            except KeyError as exc:
+                raise JSONInvalido('style de botão inválido.') from exc
+        exigir(type(estilo) is int or isinstance(estilo, discord.ButtonStyle), 'style de botão inválido.')
+        url = item.get('url')
+        custom_id = item.get('custom_id')
+        sku_id = item.get('sku_id')
+        exigir(
+            sku_id is None or str(sku_id).isdigit(),
+            'sku_id precisa ser um identificador numérico.',
+        )
+        button = discord.ui.Button(
+            style=estilo if isinstance(estilo, discord.ButtonStyle) else discord.ButtonStyle(estilo),
+            label=item.get('label'),
+            disabled=validar_bool(item, 'disabled'),
+            custom_id=custom_id,
+            url=url,
+            emoji=emoji_componente(item.get('emoji')),
+            sku_id=int(sku_id) if sku_id is not None and str(sku_id).isdigit() else None,
+            id=componente_id,
+        )
+        exigir(
+            (button.url is not None or button.sku_id is not None or button.custom_id is not None),
+            'Button precisa de custom_id, url ou sku_id.',
+        )
+        return callback_sem_acao(button) if button.custom_id else button
+    if tipo in (3, 5, 6, 7, 8):
+        custom_id = item.get('custom_id')
+        exigir(isinstance(custom_id, str) and 0 < len(custom_id) <= 100, 'Select precisa de custom_id.')
+        opcoes = item.get('options', [])
+        if tipo == 3:
+            exigir(isinstance(opcoes, list) and 1 <= len(opcoes) <= 25, 'String Select exige de 1 a 25 opções.')
+            exigir(
+                all(
+                    isinstance(opcao, dict)
+                    and isinstance(opcao.get('label'), str)
+                    and isinstance(opcao.get('value'), str)
+                    for opcao in opcoes
+                ),
+                'Cada opção de String Select precisa de label e value em texto.',
+            )
+            opcoes = [
+                discord.SelectOption(
+                    label=opcao.get('label'),
+                    value=opcao.get('value'),
+                    description=opcao.get('description'),
+                    emoji=emoji_componente(opcao.get('emoji')),
+                    default=validar_bool(opcao, 'default'),
+                )
+                for opcao in opcoes if isinstance(opcao, dict)
+            ]
+            exigir(len(opcoes) == len(item.get('options', [])), 'Opção de Select inválida.')
+        kwargs = {
+            'custom_id': custom_id,
+            'placeholder': item.get('placeholder'),
+            'min_values': item.get('min_values', 1),
+            'max_values': item.get('max_values', 1),
+            'disabled': validar_bool(item, 'disabled'),
+            'required': validar_bool(item, 'required', True),
+            'id': componente_id,
+        }
+        if tipo == 3:
+            select = discord.ui.Select(options=opcoes, **kwargs)
+        elif tipo == 5:
+            exigir(not item.get('default_values'), 'Select default_values não é suportado por este importador.')
+            select = discord.ui.UserSelect(**kwargs)
+        elif tipo == 6:
+            exigir(not item.get('default_values'), 'Select default_values não é suportado por este importador.')
+            select = discord.ui.RoleSelect(**kwargs)
+        elif tipo == 7:
+            exigir(not item.get('default_values'), 'Select default_values não é suportado por este importador.')
+            select = discord.ui.MentionableSelect(**kwargs)
+        else:
+            canais = item.get('channel_types', [])
+            exigir(isinstance(canais, list), 'channel_types precisa ser uma lista.')
+            exigir(all(type(canal) is int for canal in canais), 'channel_types deve conter números inteiros.')
+            exigir(not item.get('default_values'), 'Select default_values não é suportado por este importador.')
+            select = discord.ui.ChannelSelect(
+                channel_types=[discord.ChannelType(canal) for canal in canais],
+                **kwargs,
+            )
+        return callback_sem_acao(select)
+    raise JSONInvalido(
+        f'Componente type={tipo} não suportado. Tipos de mensagem aceitos: 1, 2, 3, 5-14 e 17.'
+    )
 
 
 def interpretar(texto):
@@ -122,18 +327,24 @@ def interpretar(texto):
     except (json.JSONDecodeError, RecursionError) as exc:
         raise JSONInvalido('JSON inválido: envie JSON puro, sem ``` e sem escapes copiados do chat.') from exc
     if isinstance(dados, list):
-        dados = {'embeds': dados}
+        if any(isinstance(item, dict) and type(item.get('type')) is int for item in dados):
+            dados = {'components': dados}
+        else:
+            dados = {'embeds': dados}
     exigir(isinstance(dados, dict), 'Use um objeto de mensagem ou uma lista de embeds.')
+    if type(dados.get('type')) is int:
+        dados = {'components': [dados]}
     exigir(not dados.get('actions'), 'actions com conteúdo exige programação própria e não será ignorado.')
     exigir(not any(dados.get(k) for k in ('attachments', 'poll', 'stickers', 'sticker_ids', 'tts')),
            'Este importador não aceita anexos, enquetes, stickers ou TTS.')
-    if dados.get('components'):
+    if 'components' in dados:
         exigir(not dados.get('content') and not dados.get('embeds'), 'V2 não aceita content/embeds junto dos componentes. Use TextDisplay.')
-        exigir(isinstance(dados['components'], list) and len(dados['components']) <= 40, 'Lista de componentes inválida.')
+        exigir(isinstance(dados['components'], list) and 1 <= len(dados['components']) <= 40, 'Lista de componentes inválida.')
         mensagem = Mensagem(components=dados['components'])
         mensagem.envio()  # Valida antes de publicar a prévia.
         return mensagem
-    exigir(not (int(dados.get('flags', 0)) & 32768), 'Flags V2 sem componentes: informe components.')
+    flags = dados.get('flags', 0)
+    exigir(type(flags) is int and not flags & 32768, 'Flags V2 sem componentes: informe components.')
     if 'embeds' not in dados and any(k in dados for k in ('title', 'description', 'fields', 'image', 'thumbnail', 'author', 'footer')):
         exigir(not dados.get('content'), 'Para misturar texto e embed, use {"content": ..., "embeds": [...]} .')
         lista = [dados]
@@ -191,7 +402,7 @@ class ConfirmarEmbedView(discord.ui.View):
                     pass
 
     @discord.ui.button(label='Aprovar e Enviar', style=discord.ButtonStyle.green)
-    async def aprovar(self, interaction, button):
+    async def aprovar(self, interaction, _button):
         await interaction.response.defer()
         async with self.lock:
             if self.finalizado:
@@ -209,7 +420,7 @@ class ConfirmarEmbedView(discord.ui.View):
             await interaction.edit_original_response(content=resultado, view=None)
 
     @discord.ui.button(label='Cancelar', style=discord.ButtonStyle.red)
-    async def cancelar(self, interaction, button):
+    async def cancelar(self, interaction, _button):
         await interaction.response.defer()
         async with self.lock:
             if self.finalizado:
@@ -218,7 +429,7 @@ class ConfirmarEmbedView(discord.ui.View):
             self.stop()
             await interaction.edit_original_response(content='Envio cancelado.', view=None)
 
-    async def on_error(self, interaction, error, item):
+    async def on_error(self, interaction, error, _item):
         log.error('Erro no controle da prévia', exc_info=(type(error), error, error.__traceback__))
         await interaction.followup.send('Falha no controle. Confira o canal antes de repetir o envio.', ephemeral=True)
 
