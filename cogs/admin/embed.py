@@ -48,21 +48,50 @@ class Mensagem:
     embeds: list | None = None
     components: list | None = None
 
-    def envio(self):
+    def _envio_componentes(self, components):
         args = {'allowed_mentions': discord.AllowedMentions.none()}
-        if self.components is not None:
-            anexos = Anexos()
-            view = discord.ui.LayoutView(timeout=None)
-            for item in self.components:
-                view.add_item(componente(item, anexos))
-            exigir(view.total_children_count <= 40, 'Máximo de 40 componentes por mensagem.')
-            exigir(view.content_length() <= 4000, 'O texto visível V2 excede 4.000 caracteres. Divida em mensagens.')
-            args['view'] = view  # discord.py define IS_COMPONENTS_V2 automaticamente.
-            if anexos.arquivos:
-                args['files'] = anexos.arquivos
-        else:
-            args.update(content=self.content, embeds=self.embeds or [])
+        anexos = Anexos()
+        view = discord.ui.LayoutView(timeout=None)
+        for item in components:
+            view.add_item(componente(item, anexos))
+        exigir(view.total_children_count <= 40, 'Máximo de 40 componentes por mensagem.')
+        exigir(view.content_length() <= 4000, 'O texto visível V2 excede 4.000 caracteres. Divida em mensagens.')
+        args['view'] = view  # discord.py define IS_COMPONENTS_V2 automaticamente.
+        if anexos.arquivos:
+            args['files'] = anexos.arquivos
         return args
+
+    def envios(self):
+        if self.components is not None:
+            grupos = []
+            componentes_sem_container = []
+            for item in self.components:
+                if isinstance(item, dict) and item.get('type') == 17:
+                    if componentes_sem_container:
+                        grupos.append(componentes_sem_container)
+                        componentes_sem_container = []
+                    grupos.append([item])
+                else:
+                    componentes_sem_container.append(item)
+            if componentes_sem_container:
+                grupos.append(componentes_sem_container)
+            return [self._envio_componentes(grupo) for grupo in grupos]
+
+        if self.embeds:
+            return [
+                {
+                    'content': self.content if indice == 0 else None,
+                    'embeds': [embed],
+                    'allowed_mentions': discord.AllowedMentions.none(),
+                }
+                for indice, embed in enumerate(self.embeds)
+            ]
+
+        return [{
+            'content': self.content,
+            'embeds': [],
+            'allowed_mentions': discord.AllowedMentions.none(),
+        }]
 
 
 def validar_bool(item, chave, padrao=False):
@@ -341,7 +370,7 @@ def interpretar(texto):
         exigir(not dados.get('content') and not dados.get('embeds'), 'V2 não aceita content/embeds junto dos componentes. Use TextDisplay.')
         exigir(isinstance(dados['components'], list) and 1 <= len(dados['components']) <= 40, 'Lista de componentes inválida.')
         mensagem = Mensagem(components=dados['components'])
-        mensagem.envio()  # Valida antes de publicar a prévia.
+        mensagem.envios()  # Valida antes de publicar a prévia.
         return mensagem
     flags = dados.get('flags', 0)
     exigir(type(flags) is int and not flags & 32768, 'Flags V2 sem componentes: informe components.')
@@ -362,10 +391,10 @@ def interpretar(texto):
             for campo in embed.fields:
                 exigir(0 < len(campo.name) <= 256 and 0 < len(campo.value) <= 1024, 'Campo de embed vazio ou grande demais.')
             exigir(len(embed.footer.text or '') <= 2048 and len(embed.author.name or '') <= 256, 'Autor/rodapé grande demais.')
+            exigir(len(embed) <= 6000, 'O texto do embed excede 6.000 caracteres.')
             embeds.append(embed)
         except (TypeError, AttributeError, KeyError) as exc:
             raise JSONInvalido('Estrutura de embed inválida.') from exc
-    exigir(sum(len(e) for e in embeds) <= 6000, 'O texto dos embeds excede 6.000 caracteres no total.')
     content = dados.get('content') or None
     exigir(content is None or isinstance(content, str) and len(content) <= 2000, 'content deve ter até 2.000 caracteres.')
     exigir(bool(content or embeds), 'Nenhum texto, embed ou componente encontrado.')
@@ -408,14 +437,25 @@ class ConfirmarEmbedView(discord.ui.View):
             if self.finalizado:
                 return
             self.finalizado = True  # Um clique somente, inclusive durante o envio.
+            enviados = []
+            payloads = []
             try:
                 exigir(self.canal is not None and hasattr(self.canal, 'send'), 'Canal indisponível.')
-                enviado = await self.canal.send(**self.mensagem.envio())
+                payloads = self.mensagem.envios()
+                for payload in payloads:
+                    enviados.append(await self.canal.send(**payload))
             except (discord.HTTPException, JSONInvalido) as exc:
                 log.warning('Falha ao publicar mensagem: %s', exc)
-                resultado = 'Não foi possível confirmar o envio. Verifique o canal e os logs antes de tentar de novo (evite duplicar a mensagem).'
+                if enviados:
+                    resultado = (
+                        f'{len(enviados)} de {len(payloads)} mensagens foram enviadas antes da falha. '
+                        f'Última enviada: {enviados[-1].jump_url}. Verifique o canal antes de tentar novamente.'
+                    )
+                else:
+                    resultado = 'Não foi possível confirmar o envio. Verifique o canal e os logs antes de tentar de novo (evite duplicar a mensagem).'
             else:
-                resultado = f'Mensagem enviada! {enviado.jump_url}'
+                quantidade = 'mensagem enviada' if len(enviados) == 1 else 'mensagens enviadas'
+                resultado = f'{len(enviados)} {quantidade}! {enviados[-1].jump_url}'
             self.stop()
             await interaction.edit_original_response(content=resultado, view=None)
 
@@ -440,8 +480,9 @@ async def mostrar_previa(interaction, texto):
         return
     try:
         mensagem = interpretar(texto)
-        # Prévia V2 em mensagem própria: nunca mistura content/embeds/View comum.
-        await interaction.followup.send(**mensagem.envio(), ephemeral=True, wait=True)
+        # Cada embed/container é exibido em uma mensagem de prévia própria.
+        for payload in mensagem.envios():
+            await interaction.followup.send(**payload, ephemeral=True, wait=True)
         view = ConfirmarEmbedView(mensagem, interaction.user.id, interaction.channel)
         view.controle = await interaction.followup.send(
             'Confira a prévia acima. Publicar neste canal? (expira em 2 minutos)',

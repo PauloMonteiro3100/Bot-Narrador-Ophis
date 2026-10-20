@@ -4,3 +4,4 @@ __pycache__/
 .vscode/
 database/tickets_panel.json
 database/tickets_panel.tmp
+dados.db
