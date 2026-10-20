@@ -47,6 +47,7 @@ class Mensagem:
     content: str | None = None
     embeds: list | None = None
     components: list | None = None
+    mensagens: list | None = None
 
     def _envio_componentes(self, components):
         args = {'allowed_mentions': discord.AllowedMentions.none()}
@@ -62,6 +63,9 @@ class Mensagem:
         return args
 
     def envios(self):
+        if self.mensagens is not None:
+            return [payload for mensagem in self.mensagens for payload in mensagem.envios()]
+
         if self.components is not None:
             grupos = []
             componentes_sem_container = []
@@ -351,10 +355,30 @@ def componente(item, anexos, dentro=False):
 
 
 def interpretar(texto):
+    decoder = json.JSONDecoder()
+    documentos = []
+    posicao = 0
     try:
-        dados = json.loads(texto)
+        while posicao < len(texto):
+            while posicao < len(texto) and texto[posicao].isspace():
+                posicao += 1
+            if posicao == len(texto):
+                break
+            dados, posicao = decoder.raw_decode(texto, posicao)
+            documentos.append(dados)
     except (json.JSONDecodeError, RecursionError) as exc:
         raise JSONInvalido('JSON inválido: envie JSON puro, sem ``` e sem escapes copiados do chat.') from exc
+    exigir(bool(documentos), 'JSON vazio.')
+    if len(documentos) > 1:
+        mensagens = [
+            interpretar(json.dumps(documento, ensure_ascii=False))
+            for documento in documentos
+        ]
+        lote = Mensagem(mensagens=mensagens)
+        exigir(len(lote.envios()) <= 40, 'Máximo de 40 mensagens por importação.')
+        return lote
+
+    dados = documentos[0]
     if isinstance(dados, list):
         if any(isinstance(item, dict) and type(item.get('type')) is int for item in dados):
             dados = {'components': dados}
@@ -497,7 +521,7 @@ async def mostrar_previa(interaction, texto):
 class EmbedModal(discord.ui.Modal, title='Criar mensagem via JSON'):
     json_input = discord.ui.TextInput(label='JSON: embeds ou Components V2',
         style=discord.TextStyle.long, required=True, max_length=4000,
-        placeholder='JSON grande? Use /criarembedarquivo e anexe o arquivo .json.')
+        placeholder='Aceita vários objetos JSON seguidos. JSON grande? Use /criarembedarquivo.')
 
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -518,7 +542,7 @@ class CriarEmbedCog(commands.Cog):
         else:
             await ctx.send('Use /criarembed ou /criarembedarquivo.')
 
-    @app_commands.command(name='criarembedarquivo', description='Importa um arquivo JSON com prévia antes de publicar.')
+    @app_commands.command(name='criarembedarquivo', description='Importa JSON (inclusive vários objetos) com prévia.')
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(arquivo='Arquivo .json UTF-8 (até 1 MB); não anexe o arquivo Python.')
